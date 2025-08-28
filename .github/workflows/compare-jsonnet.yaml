@@ -1,0 +1,107 @@
+name: Compare changes and alert on prod change
+
+on: workflow_call
+
+jobs:
+  validate:
+    name: Compare and show changes
+    runs-on: ubuntu-latest
+    env:
+      REPO_NAME: ${{ github.repository }}
+
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          # To be able to checkout forks, use special GitHub ref for HEAD
+          ref: "refs/pull/${{ github.event.number }}/head"
+
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: "refs/heads/main"
+          path: .diffsource/skvis-apps/
+
+      - name: Set up Github submodules
+        run: |
+          git submodule update --init --recursive
+          git -C .diffsource/skvis-apps/ submodule update --init --recursive
+
+      - name: Update packages
+        run: sudo apt update
+
+      - name: Install Peco
+        run: sudo apt install peco
+
+      - name: Install diff-so-fancy
+        run: sudo snap install diff-so-fancy
+
+      - name: Install go
+        uses: actions/setup-go@v5
+      - name: Install jsonnet
+        run: go install github.com/google/go-jsonnet/cmd/jsonnet@latest
+      - name: Install jsonnetfmt
+        run: go install github.com/google/go-jsonnet/cmd/jsonnetfmt@latest
+
+      - name: Diff prod - feature/main
+        shell: bash
+        run: |
+          declare -a DIFF=()
+          DIFF_PROD=$(./scripts/diff-main.sh --silent-clone --ignore-no-diff --show-diff --use-local-diffsource --md "^env/[a-z0-9]\+-prod")
+          DIFF_DEV=$(./scripts/diff-main.sh --silent-clone --ignore-no-diff --show-diff --use-local-diffsource --md "^env/[a-z0-9]\+-dev")
+
+
+          if [ "${#DIFF_PROD[@]}" -gt 0 ]; then
+            {
+              printf "MULTI_LINE_DIFF_PROD<<EOF\n%s\nEOF\n" "${DIFF_PROD[@]}"
+            } >> "$GITHUB_ENV"
+          else
+            printf "NO DIFF"
+          fi
+
+          if [ "${#DIFF_DEV[@]}" -gt 0 ]; then
+            {
+              printf "MULTI_LINE_DIFF_DEV<<EOF\n%s\nEOF\n" "${DIFF_DEV[@]}"
+            } >> "$GITHUB_ENV"
+          else
+            printf "NO DIFF"
+          fi
+      - name: Kommenterer på PR om dette treffer prod
+        if: "${{ env.MULTI_LINE_DIFF_PROD != '' }}"
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            > [!CAUTION]
+            > <h1> Denne PR-en treffer produksjon.</h1>
+            ${{ env.MULTI_LINE_DIFF_PROD }}
+
+          comment-tag: prod-diff
+
+      - name: Kommenterer på PR om dette treffer dev
+        if: "${{ env.MULTI_LINE_DIFF_DEV != '' }}"
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            > [!NOTE]
+            > <h1> Denne PR-en treffer:</h1>
+            ${{ env.MULTI_LINE_DIFF_DEV }}
+
+          comment-tag: dev-diff
+
+      - name: Slett gammel status
+        if: "${{ env.MULTI_LINE_DIFF_PROD == ''}}"
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            Gammel status
+          comment-tag: prod-diff
+          mode: delete
+
+      - name: Slett gammel status
+        if: "${{ env.MULTI_LINE_DIFF_DEV == '' }}"
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            Gammel status
+          comment-tag: dev-diff
+          mode: delete
